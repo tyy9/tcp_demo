@@ -1,0 +1,210 @@
+#include"server.h"
+
+void *server_send_file_func(void *args)
+{
+      pthread_detach(pthread_self());//设置分离属性，自行回收
+    fp_read = fopen(file_name, "rb");
+    while (1)
+    {
+        if (fp_read == NULL)
+        {
+            printf("read--打开%s失败\n", file_name);
+            exit(1);
+        }
+        bzero(buffer, sizeof(buffer));
+        int len = 0;
+        while (1)
+        {
+            len = fread(buffer, 1, sizeof(buffer), fp_read);
+            printf("len=%d\n", len);
+            if (len > 0)
+            {
+                send(client_fd, buffer, len, 0);
+            }
+            else
+            {
+                sleep(1);
+                fclose(fp_read);
+                send(client_fd, "up_exit", 7, 0);
+                printf("文件上传成功\n");
+                pthread_cond_signal(&r_mutex_cond);
+                pthread_exit(NULL);
+            }
+            usleep(1* 1000);
+        }
+        fclose(fp_read);
+    }
+}
+void *server_receive_file_func(void *args)
+{
+    pthread_detach(pthread_self());//设置分离属性，自行回收
+    printf("创建文件传输线程\n");
+    // fp_write=fopen(file_name,"wb");//wb不支持bmp的字节写入，a+可以支持所有文件格式的写入
+    int n=0;
+    while (1)
+    {   
+       fp_write=fopen(file_name,"a+");
+        bzero(buffer,sizeof(buffer)); 
+        n = recv(client_fd, buffer, 4096, 0);
+        printf("n=%d\n",n);
+        if (n < 0)
+        {
+            perror("接受客户端信息失败\n");
+            exit(0);
+        }
+        else if (n == 0)
+        {
+            printf("客户端断开链接\n");
+        }
+        if(strncmp(buffer,"up_exit",7)==0){
+            fclose(fp_write);
+            printf("文件下载成功\n");
+            pthread_cond_signal(&r_mutex_cond);
+            pthread_exit(NULL);
+        }
+        fwrite(buffer, 1, n, fp_write);
+        fseek(fp_write,1,SEEK_CUR);
+        fclose(fp_write);
+    }
+}
+void *server_receive_func(void *args)
+{
+    char receive_msg[1024];
+    char *p;
+    download_flag = 0;
+    while (1)
+    {
+        memset(receive_msg, 0, sizeof(receive_msg));
+        ret = recv(client_fd, receive_msg, sizeof(receive_msg), 0);
+        if (ret < 0)
+        {
+            perror("接受客户端信息失败\n");
+            exit(0);
+        }
+        else if (ret == 0)
+        {
+            printf("客户端断开链接\n");
+            exit(0);
+        }
+        // 判断接受的是何种数据
+        //接受文件
+        if (strstr(receive_msg, "send_") != NULL)
+        {
+              bzero(file_name,sizeof(file_name));
+            strtok(receive_msg, "_");
+            char *p=strtok(NULL, "_");
+            int i=0;
+            while(*p!='\0'){
+                file_name[i++]=*p;
+                p++;
+            }
+            printf("file_name:%s\n", file_name);
+            pthread_t receive_file_thread;
+            // 开启文件传输线程
+            if (pthread_create(&receive_file_thread, NULL, server_receive_file_func, NULL) == -1)
+            {
+                perror("创建文件传输线程失败\n");
+                exit(1);
+            }
+            // 阻塞普通读线程
+            printf("阻塞普通读线程\n");
+            pthread_cond_wait(&r_mutex_cond, &r_mutex);
+            usleep(100*1000);//让下载线程先结束
+            printf("唤醒普通读线程\n");
+        }
+        //传送文件
+        if (strstr(receive_msg, "get_") != NULL)
+        {
+            bzero(file_name,sizeof(file_name));
+            char buffer[4096];
+            strtok(receive_msg, "_");
+            char *p=strtok(NULL, "_");
+            int i=0;
+            while(*p!='\0'){
+                file_name[i++]=*p;
+                p++;
+            }
+            printf("file_name:%s\n", file_name);
+             //先往客户端发送上传命令
+            char cmd[256];
+            bzero(cmd,sizeof(cmd));
+            sprintf(cmd,"send_%s",file_name);
+            send(client_fd, cmd, strlen(cmd), 0);
+            sleep(1);
+            pthread_t send_file_thread;
+            // 创建文件上传线程
+            if (pthread_create(&send_file_thread, NULL, server_send_file_func, NULL) == -1)
+            {
+                perror("创建文件上传线程失败\n");
+                exit(1);
+            }
+            // 阻塞普通写线程
+            printf("阻塞普通读线程\n");
+            pthread_cond_wait(&r_mutex_cond, &r_mutex);
+            usleep(100*1000);//让上传线程先结束
+            printf("唤醒普通读线程\n");
+        }
+        //显示图片
+        if (strstr(receive_msg, "show_") != NULL)
+        {
+            bzero(file_name,sizeof(file_name));
+            char buffer[4096];
+            strtok(receive_msg, "_");
+            char *p=strtok(NULL, "_");
+            int i=0;
+            while(*p!='\0'){
+                file_name[i++]=*p;
+                p++;
+            }
+            printf("file_name:%s\n", file_name);
+            lcd_draw_bmp(file_name,0,0);
+        }
+        else
+        {
+            printf("服务器---接受到的信息为:%s\n", receive_msg);
+        }
+    }
+}
+void *server_send_func(void *args)
+{
+    char send_msg[1024];
+    while (1)
+    {
+        memset(send_msg, 0, sizeof(send_msg));
+        printf("服务器---请输入你所要发送的消息:");
+        scanf("%s", send_msg);
+        if (strncmp(send_msg, "exit", 4) == 0)
+        {
+            printf("退出\n");
+            exit(0);
+        }
+        send(client_fd, send_msg, strlen(send_msg), 0);
+        //上传文件
+        if (strstr(send_msg, "send_") != NULL)
+        {
+          bzero(file_name,sizeof(file_name));
+            char buffer[4096];
+            strtok(send_msg, "_");
+            char *p=strtok(NULL, "_");
+            int i=0;
+            while(*p!='\0'){
+                file_name[i++]=*p;
+                p++;
+            }
+            printf("file_name:%s\n", file_name);
+            pthread_t send_file_thread;
+            // 创建文件上传线程
+            if (pthread_create(&send_file_thread, NULL, server_send_file_func, NULL) == -1)
+            {
+                perror("创建文件上传线程失败\n");
+                exit(1);
+            }
+            // 阻塞普通写线程
+            printf("阻塞普通写线程\n");
+            pthread_cond_wait(&r_mutex_cond, &r_mutex);
+            usleep(100*1000);//让上传线程先结束
+            printf("唤醒普通写线程\n");
+        }
+
+    }
+}
